@@ -31,7 +31,7 @@
  * pozostałe w kolejce; trwająca aktualizacja na urządzeniu i tak się dokończy).
  */
 
-const HOMEID_FLEET_CARD_VERSION = "1.2.0";
+const HOMEID_FLEET_CARD_VERSION = "1.3.0";
 
 // Fazy zadania aktualizacji; FINAL = stany końcowe.
 const HF_FINAL = ["done", "uptodate", "failed", "timeout", "offline", "cancelled"];
@@ -89,7 +89,13 @@ class HomeidFleetCard extends HTMLElement {
         this._ticker = null;
         this._sig = "";
 
+        this._suppressClickUntil = 0;
+
         // Delegacja zdarzeń — DOM jest przebudowywany przy każdym renderze.
+        // Akcje przycisków odpalamy już na pointerdown: reagują natychmiast
+        // i nie giną, gdy re-render podmieni DOM między mousedown a mouseup
+        // (wtedy przeglądarka w ogóle nie wygeneruje zdarzenia click).
+        this.shadowRoot.addEventListener("pointerdown", (e) => this._onPointerDown(e));
         this.shadowRoot.addEventListener("click", (e) => this._onClick(e));
         this.shadowRoot.addEventListener("change", (e) => this._onChange(e));
         this.shadowRoot.addEventListener("input", (e) => {
@@ -470,29 +476,52 @@ class HomeidFleetCard extends HTMLElement {
 
     // -- zdarzenia UI ---------------------------------------------------------
 
+    _actionTarget(e) {
+        return e.composedPath().find((n) => n.dataset && (n.dataset.act || n.dataset.sort));
+    }
+
+    _onPointerDown(e) {
+        if (e.button !== 0) return;  // tylko główny przycisk myszy / tap
+        const el = this._actionTarget(e);
+        if (!el) return;
+        // Nawigacja linkiem zostaje w click (preventDefault musi trafić
+        // w domyślną akcję <a>, która dzieje się dopiero przy click).
+        if (el.dataset.act === "open-device") return;
+        this._suppressClickUntil = Date.now() + 500;
+        this._doAction(el);
+    }
+
     _onClick(e) {
-        const path = e.composedPath();
-        const sortEl = path.find((n) => n.dataset && n.dataset.sort);
-        if (sortEl) {
-            const key = sortEl.dataset.sort;
+        const el = this._actionTarget(e);
+        if (!el) return;
+        const act = el.dataset.act;
+        if (act === "open-device" && el.dataset.id) {
+            // Ctrl/Cmd/Shift + klik -> zostaw przeglądarce (nowa karta).
+            if (e.ctrlKey || e.metaKey || e.shiftKey) return;
+            e.preventDefault();
+            // Nawigacja SPA Home Assistanta (bez przeładowania strony).
+            history.pushState(null, "", `/config/devices/device/${el.dataset.id}`);
+            window.dispatchEvent(new CustomEvent("location-changed"));
+            return;
+        }
+        // Akcja już wykonana w pointerdown; click zostaje jako fallback dla
+        // aktywacji z klawiatury (Enter/Spacja nie generują pointerdown).
+        if (Date.now() < this._suppressClickUntil) return;
+        this._doAction(el);
+    }
+
+    _doAction(el) {
+        if (el.dataset.sort) {
+            const key = el.dataset.sort;
             if (this._sort.key === key) this._sort.dir *= -1;
             else this._sort = { key, dir: 1 };
             this._sig = "";
             this._render();
             return;
         }
-        const el = path.find((n) => n.dataset && n.dataset.act);
-        if (!el) return;
         const act = el.dataset.act;
         const id = el.dataset.id;
-        if (act === "open-device" && id) {
-            // Ctrl/Cmd/Shift + klik -> zostaw przeglądarce (nowa karta).
-            if (e.ctrlKey || e.metaKey || e.shiftKey) return;
-            e.preventDefault();
-            // Nawigacja SPA Home Assistanta (bez przeładowania strony).
-            history.pushState(null, "", `/config/devices/device/${id}`);
-            window.dispatchEvent(new CustomEvent("location-changed"));
-        } else if (act === "update-one" && id) {
+        if (act === "update-one" && id) {
             this._enqueue([id]);
         } else if (act === "update-selected") {
             const ids = this._devices.filter((d) => this._selected.has(d.id)).map((d) => d.id);
@@ -586,9 +615,14 @@ class HomeidFleetCard extends HTMLElement {
             [...this._selected],
             visible.map((d) => {
                 const j = this._jobs.get(d.id);
+                // RSSI kubełkowany co 5 dBm, uptime po sformatowaniu — inaczej
+                // każda okresowa publikacja diagnostyki wymuszałaby pełny
+                // re-render (podmiana DOM zjada trwające kliknięcia).
+                const rssi = parseInt(this._diag(d, d.rssiSensor), 10);
                 return [d.id, d.name, d.model, d.sw, this._isOnline(d), this._otaState(d),
-                    this._diag(d, d.ipSensor), this._diag(d, d.rssiSensor),
-                    this._uptimeSec(d),
+                    this._diag(d, d.ipSensor),
+                    isNaN(rssi) ? "" : Math.round(rssi / 5) * 5,
+                    hfUptime(this._uptimeSec(d)),
                     j ? [j.phase, j.note, running ? Math.round((Date.now() - j.t0) / 1000) : 0] : null];
             }),
         ]);
@@ -676,6 +710,8 @@ class HomeidFleetCard extends HTMLElement {
                    background: var(--primary-color); color: var(--text-primary-color, #fff);
                    font: inherit; font-size: 0.85em; }
             .btn:disabled { opacity: 0.35; cursor: default; }
+            .btn:not(:disabled):active { transform: scale(0.94);
+                                         filter: brightness(0.85); }
             .btn.small { padding: 5px 10px; }
             .btn.ghost { background: transparent; color: var(--primary-color);
                          border: 1px solid var(--primary-color); }
