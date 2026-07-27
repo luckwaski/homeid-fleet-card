@@ -31,7 +31,7 @@
  * pozostałe w kolejce; trwająca aktualizacja na urządzeniu i tak się dokończy).
  */
 
-const HOMEID_FLEET_CARD_VERSION = "1.4.1";
+const HOMEID_FLEET_CARD_VERSION = "1.5.0";
 
 // Fazy zadania aktualizacji; FINAL = stany końcowe.
 const HF_FINAL = ["done", "uptodate", "failed", "timeout", "offline", "cancelled"];
@@ -394,6 +394,7 @@ class HomeidFleetCard extends HTMLElement {
             if (this._batch) this._batch.total--;
         }
         this._queue = [];
+        if (!this._active) this._stopTicker();
         this._sig = "";
         this._render();
     }
@@ -422,7 +423,13 @@ class HomeidFleetCard extends HTMLElement {
         if (!id || !this._hass) return;
         const dev = this._devices.find((d) => d.id === id);
         const job = this._jobs.get(id);
-        if (!dev || !job) { this._active = null; return; }
+        if (!dev || !job) {
+            // Urządzenie zniknęło z rejestru w trakcie — nie zostawiaj
+            // tykającego tickera bez aktywnego zadania.
+            this._active = null;
+            if (!this._queue.length) this._stopTicker();
+            return;
+        }
 
         if ((Date.now() - job.t0) / 1000 > (this._config.timeout || 300)) {
             return this._finish(id, "timeout");
@@ -481,9 +488,11 @@ class HomeidFleetCard extends HTMLElement {
 
     _startTicker() {
         if (this._ticker) return;
+        // Ticker nie wymusza renderu — sygnatura i tak zawiera upływające
+        // sekundy aktywnego zadania, więc zmienia się dokładnie wtedy,
+        // gdy jest co odświeżyć.
         this._ticker = setInterval(() => {
             this._tick();
-            this._sig = "";
             this._render();
         }, 1000);
     }
@@ -621,6 +630,7 @@ class HomeidFleetCard extends HTMLElement {
 
     _render() {
         if (!this._config) return;
+        this._ensureSkeleton();
         const maxVer = this._maxVerByModel();
         const running = !!this._active || !!this._queue.length || !!this._settleTimer;
         const visible = this._visibleDevices(maxVer);
@@ -654,70 +664,93 @@ class HomeidFleetCard extends HTMLElement {
         const visOnline = visible.filter((d) => this._isOnline(d));
         const allSel = visOnline.length > 0 && visOnline.every((d) => this._selected.has(d.id));
         const hasResults = [...this._jobs.values()].some((j) => HF_FINAL.includes(j.phase));
+        const $ = (q) => this.shadowRoot.querySelector(q);
+        const setHtml = (el, html) => {
+            if (el._hfHtml !== html) { el.innerHTML = html; el._hfHtml = html; }
+        };
 
-        const arrow = (key) => this._sort.key === key
-            ? `<span class="arr">${this._sort.dir > 0 ? "▲" : "▼"}</span>`
-            : `<span class="arr dim">↕</span>`;
+        // nagłówek
+        const titleEl = $(".title");
+        if (titleEl.textContent !== this._config.title) titleEl.textContent = this._config.title;
+        const searchEl = $("[data-search]");
+        if (searchEl.value !== this._filter) searchEl.value = this._filter;
 
-        const rows = visible.map((d) => {
-            const online = this._isOnline(d);
-            const job = this._jobs.get(d.id);
-            const busy = job && !HF_FINAL.includes(job.phase);
-            const stale = this._isStale(d, maxVer);
-            const ip = this._config.show_diagnostics ? this._diag(d, d.ipSensor) : "";
-            const rssi = this._config.show_diagnostics ? this._diag(d, d.rssiSensor) : "";
-            const up = this._uptimeSec(d);
-            const sub = [d.chip ? "ID " + hfEsc(d.chip) : "", ip ? hfEsc(ip) : "",
-                rssi ? hfEsc(rssi) + " dBm" : ""].filter(Boolean).join(" · ");
-            return `
-            <tr class="${online ? "" : "offline"}">
-                <td class="c-sel">
-                    <input type="checkbox" data-sel="${d.id}"
-                        ${this._selected.has(d.id) ? "checked" : ""}
-                        ${online && !busy ? "" : "disabled"}>
-                </td>
-                <td class="c-name">
-                    <span class="dot ${online ? "on" : "off"}"
-                        title="${online ? "online" : "offline"}"></span>
-                    <div class="who">
-                        <div class="name"><a class="devlink"
-                            href="/config/devices/device/${d.id}"
-                            data-act="open-device" data-id="${d.id}"
-                            title="Otwórz stronę urządzenia">${hfEsc(d.name)}</a></div>
-                        ${sub ? `<div class="sub">${sub}</div>` : ""}
-                    </div>
-                </td>
-                <td class="c-model">${hfEsc(d.model)}</td>
-                <td class="c-ver ${stale ? "stale" : ""}">${hfEsc(d.sw || "—")}</td>
-                <td class="c-up">${online && up >= 0 ? hfUptime(up) : "—"}</td>
-                <td class="c-stat">${this._statusCell(d, job, stale)}</td>
-                <td class="c-acts">
-                    <button class="btn small" data-act="update-one" data-id="${d.id}"
-                        ${online && !busy ? "" : "disabled"}>Aktualizuj</button>
-                    ${d.btnRestart ? `
-                    <button class="btn small ghost" data-act="restart-one" data-id="${d.id}"
-                        title="Restart urządzenia" ${online && !busy ? "" : "disabled"}>⟳</button>` : ""}
-                </td>
-            </tr>`;
-        }).join("");
+        // przyciski akcji
+        setHtml($(".actions"), (running
+            ? `<button class="btn danger" data-act="cancel"
+                   ${this._queue.length ? "" : "disabled"}>Anuluj pozostałe</button>`
+            : `<button class="btn" data-act="update-selected"
+                   ${nSel ? "" : "disabled"}>Aktualizuj zaznaczone (${nSel})</button>`) +
+            (hasResults && !running
+                ? `<button class="btn ghost" data-act="clear-results">Wyczyść wyniki</button>` : ""));
 
+        // pasek postępu serii
         const activeDev = this._active
             ? this._devices.find((d) => d.id === this._active) : null;
         const progress = running && this._batch
             ? `Aktualizacja ${Math.min(this._batch.done + 1, this._batch.total)}/${this._batch.total}` +
               (activeDev ? ` — ${hfEsc(activeDev.name)}` : "…")
             : "";
+        const progEl = $(".progress");
+        setHtml(progEl, progress);
+        progEl.hidden = !progress;
 
-        // Stan fokusa wyszukiwarki PRZED podmianą DOM — czytany wprost
-        // z shadowRoot.activeElement (Chrome odpala focusout przy usuwaniu
-        // sfokusowanego elementu, więc księgowość na zdarzeniach zawodzi).
-        const oldSearch = this.shadowRoot.querySelector("[data-search]");
-        const search = {
-            hadFocus: !!oldSearch && this.shadowRoot.activeElement === oldSearch,
-            selStart: (oldSearch && oldSearch.selectionStart) || 0,
-            selEnd: (oldSearch && oldSearch.selectionEnd) || 0,
-        };
+        // podsumowanie
+        setHtml($(".summary"),
+            `${this._devices.length} urządzeń · ${nOnline} online` +
+            (nStale ? ` · <span style="color:var(--warning-color,#ff9800)">${nStale} ze starszą wersją</span>` : "") +
+            (this._filter.trim() ? ` · filtr: ${visible.length}/${this._devices.length}` : ""));
 
+        // pusta flota vs tabela
+        const noDev = $(".nodev");
+        const twrap = $(".twrap");
+        noDev.hidden = !!this._devices.length;
+        twrap.hidden = !this._devices.length;
+        if (!this._devices.length) {
+            setHtml(noDev, `Nie znaleziono urządzeń (manufacturer: "${hfEsc(this._config.manufacturer)}").
+                Sprawdź, czy urządzenia są sparowane przez MQTT discovery.`);
+            return;
+        }
+
+        // nagłówki kolumn (przebudowa tylko przy zmianie sortowania)
+        const arrow = (key) => this._sort.key === key
+            ? `<span class="arr">${this._sort.dir > 0 ? "▲" : "▼"}</span>`
+            : `<span class="arr dim">↕</span>`;
+        setHtml($("thead tr"), `
+            <th class="c-sel">
+                <input type="checkbox" data-selall title="zaznacz widoczne online">
+            </th>
+            <th class="sortable" data-sort="name">Nazwa ${arrow("name")}</th>
+            <th class="sortable" data-sort="model">Model ${arrow("model")}</th>
+            <th class="sortable" data-sort="version">Wersja ${arrow("version")}</th>
+            <th class="sortable" data-sort="uptime">Uptime ${arrow("uptime")}</th>
+            <th class="sortable" data-sort="status">Status ${arrow("status")}</th>
+            <th></th>`);
+
+        // checkbox zbiorczy — właściwościami, bez przebudowy DOM
+        const selall = $("[data-selall]");
+        selall.checked = allSel;
+        selall.disabled = !(visOnline.length && !running);
+        selall.indeterminate =
+            visOnline.some((d) => this._selected.has(d.id)) && !allSel;
+
+        // wiersze — rekoncyliacja po device_id, podmieniamy tylko zmienione
+        this._syncRows(visible, maxVer);
+
+        const nores = $(".nores");
+        nores.hidden = visible.length > 0;
+        if (!visible.length) {
+            setHtml(nores, `Brak urządzeń pasujących do "${hfEsc(this._filter)}".`);
+        }
+    }
+
+    // Statyczny szkielet karty tworzony RAZ. Wyszukiwarka i kontener scrolla
+    // tabeli nigdy nie są niszczone — re-render podmienia wyłącznie dynamiczne
+    // fragmenty, a wiersze tylko te, których HTML faktycznie się zmienił.
+    // Dzięki temu fokus/kursor, pozycja scrolla i trwające gesty (telefon!)
+    // przeżywają każdą aktualizację stanu.
+    _ensureSkeleton() {
+        if (this.shadowRoot.querySelector("ha-card")) return;
         this.shadowRoot.innerHTML = `
         <style>
             :host { display: block; }
@@ -726,6 +759,7 @@ class HomeidFleetCard extends HTMLElement {
                     margin-bottom: 4px; }
             .title { font-size: 1.15em; font-weight: 500; margin-right: auto;
                      color: var(--primary-text-color); }
+            .actions { display: contents; }
             .search { padding: 7px 10px; border: 1px solid var(--divider-color);
                       border-radius: 6px; background: var(--card-background-color);
                       color: var(--primary-text-color); font: inherit;
@@ -796,69 +830,91 @@ class HomeidFleetCard extends HTMLElement {
         </style>
         <ha-card>
             <div class="head">
-                <span class="title">${hfEsc(this._config.title)}</span>
-                <input class="search" type="search" data-search placeholder="Szukaj…"
-                    value="${hfEsc(this._filter)}">
-                ${running
-                    ? `<button class="btn danger" data-act="cancel"
-                           ${this._queue.length ? "" : "disabled"}>Anuluj pozostałe</button>`
-                    : `<button class="btn" data-act="update-selected"
-                           ${nSel ? "" : "disabled"}>Aktualizuj zaznaczone (${nSel})</button>`}
-                ${hasResults && !running
-                    ? `<button class="btn ghost" data-act="clear-results">Wyczyść wyniki</button>` : ""}
+                <span class="title"></span>
+                <input class="search" type="search" data-search placeholder="Szukaj…">
+                <span class="actions"></span>
             </div>
-            ${progress ? `<div class="progress">${progress}</div>` : ""}
-            <div class="summary">
-                ${this._devices.length} urządzeń · ${nOnline} online
-                ${nStale ? ` · <span style="color:var(--warning-color,#ff9800)">${nStale} ze starszą wersją</span>` : ""}
-                ${this._filter.trim() ? ` · filtr: ${visible.length}/${this._devices.length}` : ""}
+            <div class="progress" hidden></div>
+            <div class="summary"></div>
+            <div class="empty nodev" hidden></div>
+            <div class="twrap" hidden>
+                <table>
+                    <thead><tr></tr></thead>
+                    <tbody></tbody>
+                </table>
+                <div class="empty nores" hidden></div>
             </div>
-            ${this._devices.length ? `
-            <div class="twrap">
-            <table>
-                <thead>
-                    <tr>
-                        <th class="c-sel">
-                            <input type="checkbox" data-selall
-                                title="zaznacz widoczne online"
-                                ${allSel ? "checked" : ""}
-                                ${visOnline.length && !running ? "" : "disabled"}>
-                        </th>
-                        <th class="sortable" data-sort="name">Nazwa ${arrow("name")}</th>
-                        <th class="sortable" data-sort="model">Model ${arrow("model")}</th>
-                        <th class="sortable" data-sort="version">Wersja ${arrow("version")}</th>
-                        <th class="sortable" data-sort="uptime">Uptime ${arrow("uptime")}</th>
-                        <th class="sortable" data-sort="status">Status ${arrow("status")}</th>
-                        <th></th>
-                    </tr>
-                </thead>
-                <tbody>
-                    ${rows || `<tr><td colspan="7" class="empty">
-                        Brak urządzeń pasujących do "${hfEsc(this._filter)}".</td></tr>`}
-                </tbody>
-            </table>
-            </div>` : `
-            <div class="empty">
-                Nie znaleziono urządzeń (manufacturer: "${hfEsc(this._config.manufacturer)}").
-                Sprawdź, czy urządzenia są sparowane przez MQTT discovery.
-            </div>`}
         </ha-card>`;
+    }
 
-        // "zaznacz widoczne" jako indeterminate przy częściowym zaznaczeniu
-        const selall = this.shadowRoot.querySelector("[data-selall]");
-        if (selall) {
-            const nVisSel = visOnline.filter((d) => this._selected.has(d.id)).length;
-            selall.indeterminate = nVisSel > 0 && !allSel;
-        }
-        // Przywróć fokus i pozycję kursora wyszukiwarki po przebudowie DOM.
-        if (search.hadFocus) {
-            const s = this.shadowRoot.querySelector("[data-search]");
-            if (s) {
-                s.focus();
-                try { s.setSelectionRange(search.selStart, search.selEnd); }
-                catch (e) { /* nieobsługiwane dla tego typu pola */ }
+    _rowHtml(d, maxVer) {
+        const online = this._isOnline(d);
+        const job = this._jobs.get(d.id);
+        const busy = job && !HF_FINAL.includes(job.phase);
+        const stale = this._isStale(d, maxVer);
+        const ip = this._config.show_diagnostics ? this._diag(d, d.ipSensor) : "";
+        const rssi = this._config.show_diagnostics ? this._diag(d, d.rssiSensor) : "";
+        const up = this._uptimeSec(d);
+        const sub = [d.chip ? "ID " + hfEsc(d.chip) : "", ip ? hfEsc(ip) : "",
+            rssi ? hfEsc(rssi) + " dBm" : ""].filter(Boolean).join(" · ");
+        return `
+        <tr data-id="${d.id}" class="${online ? "" : "offline"}">
+            <td class="c-sel">
+                <input type="checkbox" data-sel="${d.id}"
+                    ${this._selected.has(d.id) ? "checked" : ""}
+                    ${online && !busy ? "" : "disabled"}>
+            </td>
+            <td class="c-name">
+                <span class="dot ${online ? "on" : "off"}"
+                    title="${online ? "online" : "offline"}"></span>
+                <div class="who">
+                    <div class="name"><a class="devlink"
+                        href="/config/devices/device/${d.id}"
+                        data-act="open-device" data-id="${d.id}"
+                        title="Otwórz stronę urządzenia">${hfEsc(d.name)}</a></div>
+                    ${sub ? `<div class="sub">${sub}</div>` : ""}
+                </div>
+            </td>
+            <td class="c-model">${hfEsc(d.model)}</td>
+            <td class="c-ver ${stale ? "stale" : ""}">${hfEsc(d.sw || "—")}</td>
+            <td class="c-up">${online && up >= 0 ? hfUptime(up) : "—"}</td>
+            <td class="c-stat">${this._statusCell(d, job, stale)}</td>
+            <td class="c-acts">
+                <button class="btn small" data-act="update-one" data-id="${d.id}"
+                    ${online && !busy ? "" : "disabled"}>Aktualizuj</button>
+                ${d.btnRestart ? `
+                <button class="btn small ghost" data-act="restart-one" data-id="${d.id}"
+                    title="Restart urządzenia" ${online && !busy ? "" : "disabled"}>⟳</button>` : ""}
+            </td>
+        </tr>`;
+    }
+
+    // Utrzymuje <tbody> w zgodzie z listą visible: wiersze kluczowane po
+    // data-id, pojedynczy <tr> jest podmieniany tylko gdy zmienił się jego
+    // HTML, a zmiana kolejności przestawia istniejące węzły zamiast budować
+    // tabelę od nowa.
+    _syncRows(visible, maxVer) {
+        const tbody = this.shadowRoot.querySelector("tbody");
+        const byId = new Map();
+        for (const tr of Array.from(tbody.children)) byId.set(tr.dataset.id, tr);
+        let prev = null;
+        for (const d of visible) {
+            const html = this._rowHtml(d, maxVer);
+            let tr = byId.get(d.id);
+            if (tr) byId.delete(d.id);
+            if (!tr || tr._hfHtml !== html) {
+                const tpl = document.createElement("template");
+                tpl.innerHTML = html.trim();
+                const fresh = tpl.content.firstElementChild;
+                fresh._hfHtml = html;
+                if (tr) tr.replaceWith(fresh);
+                tr = fresh;
             }
+            const want = prev ? prev.nextElementSibling : tbody.firstElementChild;
+            if (tr !== want) tbody.insertBefore(tr, want);
+            prev = tr;
         }
+        for (const tr of byId.values()) tr.remove();
     }
 }
 
