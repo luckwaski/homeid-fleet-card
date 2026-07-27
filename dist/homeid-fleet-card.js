@@ -31,7 +31,7 @@
  * pozostałe w kolejce; trwająca aktualizacja na urządzeniu i tak się dokończy).
  */
 
-const HOMEID_FLEET_CARD_VERSION = "1.1.0";
+const HOMEID_FLEET_CARD_VERSION = "1.2.0";
 
 // Fazy zadania aktualizacji; FINAL = stany końcowe.
 const HF_FINAL = ["done", "uptodate", "failed", "timeout", "offline", "cancelled"];
@@ -485,7 +485,14 @@ class HomeidFleetCard extends HTMLElement {
         if (!el) return;
         const act = el.dataset.act;
         const id = el.dataset.id;
-        if (act === "update-one" && id) {
+        if (act === "open-device" && id) {
+            // Ctrl/Cmd/Shift + klik -> zostaw przeglądarce (nowa karta).
+            if (e.ctrlKey || e.metaKey || e.shiftKey) return;
+            e.preventDefault();
+            // Nawigacja SPA Home Assistanta (bez przeładowania strony).
+            history.pushState(null, "", `/config/devices/device/${id}`);
+            window.dispatchEvent(new CustomEvent("location-changed"));
+        } else if (act === "update-one" && id) {
             this._enqueue([id]);
         } else if (act === "update-selected") {
             const ids = this._devices.filter((d) => this._selected.has(d.id)).map((d) => d.id);
@@ -620,7 +627,10 @@ class HomeidFleetCard extends HTMLElement {
                     <span class="dot ${online ? "on" : "off"}"
                         title="${online ? "online" : "offline"}"></span>
                     <div class="who">
-                        <div class="name">${hfEsc(d.name)}</div>
+                        <div class="name"><a class="devlink"
+                            href="/config/devices/device/${d.id}"
+                            data-act="open-device" data-id="${d.id}"
+                            title="Otwórz stronę urządzenia">${hfEsc(d.name)}</a></div>
                         ${sub ? `<div class="sub">${sub}</div>` : ""}
                     </div>
                 </td>
@@ -694,6 +704,9 @@ class HomeidFleetCard extends HTMLElement {
             .dot.off { background: var(--disabled-text-color, #9e9e9e); }
             .name { color: var(--primary-text-color); white-space: nowrap;
                     overflow: hidden; text-overflow: ellipsis; }
+            .name a.devlink { color: inherit; text-decoration: none; }
+            .name a.devlink:hover { color: var(--primary-color);
+                                    text-decoration: underline; }
             .sub { color: var(--secondary-text-color); font-size: 0.78em;
                    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
             .c-model { font-size: 0.85em; color: var(--primary-text-color);

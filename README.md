@@ -18,6 +18,9 @@ required; the card is pure frontend.
 - **Sorting and search** — click a column header (name / model / version / uptime /
   status) to sort, click again to reverse; the search box filters by name, model,
   chip ID, IP and version.
+- **Device page link** — the device name opens the HA device page
+  (`/config/devices/device/<id>`) via SPA navigation; Ctrl/Cmd-click opens it
+  in a new browser tab.
 - **Stale-version highlight** — devices running an older firmware than the newest
   one seen in the fleet (compared per model) are marked orange, with a fleet-wide
   counter in the summary line.
