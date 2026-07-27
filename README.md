@@ -94,9 +94,14 @@ The card talks only to standard Home Assistant APIs:
   version, which refreshes the version column automatically.
 
 Success is detected by values, not just transitions — the HA frontend coalesces
-state changes, so a fast update may never show the offline blip. The card treats
-`ota/state` returning to `idle` **or** a changed `sw_version` in the registry as
-a completed update, with a per-device timeout as the final backstop.
+state changes, so a fast update may never show the offline blip. The only proof
+of success is a **changed `sw_version`** in the device registry (re-published by
+discovery after the reboot). A reboot with `ota/state` back to `idle` but the
+same version enters a *verifying* phase instead: if the *Restart reason* sensor
+reports an exception/watchdog reset, the update is marked as **crashed during
+OTA** (a known ESP8266 failure mode when heap is too low/fragmented for TLS);
+otherwise it fails as "version unchanged", with a per-device timeout as the
+final backstop.
 
 > **Note:** the update queue runs in the browser tab. Keep the dashboard open until
 > the batch finishes — closing the tab cancels the devices still waiting in the

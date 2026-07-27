@@ -31,7 +31,7 @@
  * pozostałe w kolejce; trwająca aktualizacja na urządzeniu i tak się dokończy).
  */
 
-const HOMEID_FLEET_CARD_VERSION = "1.3.0";
+const HOMEID_FLEET_CARD_VERSION = "1.4.0";
 
 // Fazy zadania aktualizacji; FINAL = stany końcowe.
 const HF_FINAL = ["done", "uptodate", "failed", "timeout", "offline", "cancelled"];
@@ -226,6 +226,8 @@ class HomeidFleetCard extends HTMLElement {
                         "WiFi signal", ["wifi_signal", "_rssi"]),
                     uptimeSensor: this._findEntity(de, "sensor", "duration",
                         "Uptime", ["uptime"]),
+                    resetSensor: this._findEntity(de, "sensor", null,
+                        "Restart reason", ["restart_reason", "_reset"]),
                 };
                 if (row.btnUpdate) list.push(row); // tylko urządzenia z przyciskiem OTA
             }
@@ -413,9 +415,20 @@ class HomeidFleetCard extends HTMLElement {
     //
     // WAŻNE: frontend HA koalescuje zmiany stanów — przy szybkim OTA karta może
     // w ogóle nie zobaczyć przejścia offline->online ani stanu pośredniego.
-    // Dlatego sukces rozpoznajemy po WARTOŚCIACH, nie po samych przejściach:
-    //  - ota/state wraca do "idle" (wartość po reboocie z nowym firmware),
-    //  - albo sw_version w rejestrze różni się od wersji sprzed aktualizacji.
+    // Dlatego sukces rozpoznajemy po WARTOŚCIACH, nie po samych przejściach.
+    //
+    // JEDYNYM dowodem sukcesu jest ZMIANA sw_version w rejestrze (discovery
+    // republikowane po reboocie). Sam reboot + ota/state=="idle" to za mało:
+    // urządzenie mogło się wywalić w trakcie pobierania (exception/watchdog
+    // reset, klasyka przy braku heapu dla BearSSL) i wstać ze STARĄ wersją —
+    // dlatego po powrocie online wchodzimy w fazę "verifying" i czekamy na
+    // nową wersję, sprawdzając przy okazji sensor "Restart reason".
+    _startVerify(job) {
+        job.phase = "verifying";
+        job.verifyT0 = Date.now();
+        this._sig = "";
+    }
+
     _tick() {
         const id = this._active;
         if (!id || !this._hass) return;
@@ -443,7 +456,7 @@ class HomeidFleetCard extends HTMLElement {
                 // Blokujące pobieranie może zerwać sesję MQTT (LWT offline)
                 // zarówno przy sukcesie (reboot), jak i przy 304/failed.
                 if (!online) { job.phase = "rebooting"; this._sig = ""; }
-                else if (st === "idle") this._finish(id, "done"); // reboot przegapiony
+                else if (st === "idle") this._startVerify(job); // reboot przegapiony
                 else if (st === "up to date") this._finish(id, "uptodate");
                 else if (st && (st.startsWith("failed") || st === "no wifi")) {
                     this._finish(id, "failed", st);
@@ -455,9 +468,26 @@ class HomeidFleetCard extends HTMLElement {
                 if (online && st && st !== "downloading" && st !== "unavailable") {
                     if (st.startsWith("failed") || st === "no wifi") this._finish(id, "failed", st);
                     else if (st === "up to date") this._finish(id, "uptodate");
-                    else this._finish(id, "done"); // "idle" = boot z nowym firmware
+                    else this._startVerify(job); // "idle" — sukces potwierdzi wersja
                 }
                 break;
+            case "verifying": {
+                // Sukces (swChanged) łapie warunek na górze. Tu rozstrzygamy
+                // porażki: crash w trakcie OTA (exception/watchdog) albo brak
+                // nowej wersji mimo restartu. 15 s zwłoki daje discovery i
+                // sensorowi "Restart reason" czas na świeżą publikację, żeby
+                // nie działać na wartościach retained sprzed aktualizacji.
+                const since = (Date.now() - job.verifyT0) / 1000;
+                const reset = this._diag(dev, dev.resetSensor);
+                const crashed = /exception|watchdog/i.test(reset);
+                if (since > 15 && crashed) {
+                    this._finish(id, "failed",
+                        `crash podczas aktualizacji (${reset}), wersja bez zmian`);
+                } else if (since > 60) {
+                    this._finish(id, "failed", "wersja bez zmian po restarcie");
+                }
+                break;
+            }
         }
     }
 
@@ -579,6 +609,7 @@ class HomeidFleetCard extends HTMLElement {
                 case "pressing":    return chip(`wysyłanie polecenia… ${el}s`, "run");
                 case "downloading": return chip(`pobieranie firmware… ${el}s`, "run");
                 case "rebooting":   return chip(`restart urządzenia… ${el}s`, "run");
+                case "verifying":   return chip(`weryfikacja wersji… ${el}s`, "run");
                 case "done": {
                     const from = job.startVersion, to = dev.sw;
                     const txt = from && to && from !== to
