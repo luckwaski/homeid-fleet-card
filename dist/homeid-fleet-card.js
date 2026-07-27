@@ -31,7 +31,7 @@
  * pozostałe w kolejce; trwająca aktualizacja na urządzeniu i tak się dokończy).
  */
 
-const HOMEID_FLEET_CARD_VERSION = "1.4.0";
+const HOMEID_FLEET_CARD_VERSION = "1.4.1";
 
 // Fazy zadania aktualizacji; FINAL = stany końcowe.
 const HF_FINAL = ["done", "uptodate", "failed", "timeout", "offline", "cancelled"];
@@ -80,7 +80,6 @@ class HomeidFleetCard extends HTMLElement {
         this._batch = null;          // {done, total} bieżącej serii
         this._sort = { key: "model", dir: 1 };
         this._filter = "";
-        this._searchFocus = false;
         this._regLoaded = false;
         this._subscribed = false;
         this._unsubs = [];
@@ -102,20 +101,9 @@ class HomeidFleetCard extends HTMLElement {
             const t = e.target;
             if (t && t.dataset && t.dataset.search !== undefined) {
                 this._filter = t.value;
-                this._searchFocus = true;
                 this._sig = "";
                 this._render();
             }
-        });
-        // Zapamiętujemy fokus wyszukiwarki, żeby przywrócić go po re-renderze
-        // (innerHTML wymienia całe drzewo, więc pole traciłoby kursor).
-        this.shadowRoot.addEventListener("focusin", (e) => {
-            const t = e.target;
-            if (t && t.dataset && t.dataset.search !== undefined) this._searchFocus = true;
-        });
-        this.shadowRoot.addEventListener("focusout", (e) => {
-            const t = e.target;
-            if (t && t.dataset && t.dataset.search !== undefined) this._searchFocus = false;
         });
     }
 
@@ -720,6 +708,16 @@ class HomeidFleetCard extends HTMLElement {
               (activeDev ? ` — ${hfEsc(activeDev.name)}` : "…")
             : "";
 
+        // Stan fokusa wyszukiwarki PRZED podmianą DOM — czytany wprost
+        // z shadowRoot.activeElement (Chrome odpala focusout przy usuwaniu
+        // sfokusowanego elementu, więc księgowość na zdarzeniach zawodzi).
+        const oldSearch = this.shadowRoot.querySelector("[data-search]");
+        const search = {
+            hadFocus: !!oldSearch && this.shadowRoot.activeElement === oldSearch,
+            selStart: (oldSearch && oldSearch.selectionStart) || 0,
+            selEnd: (oldSearch && oldSearch.selectionEnd) || 0,
+        };
+
         this.shadowRoot.innerHTML = `
         <style>
             :host { display: block; }
@@ -852,13 +850,13 @@ class HomeidFleetCard extends HTMLElement {
             const nVisSel = visOnline.filter((d) => this._selected.has(d.id)).length;
             selall.indeterminate = nVisSel > 0 && !allSel;
         }
-        // Przywróć fokus wyszukiwarki po przebudowie DOM (kursor na końcu).
-        if (this._searchFocus) {
+        // Przywróć fokus i pozycję kursora wyszukiwarki po przebudowie DOM.
+        if (search.hadFocus) {
             const s = this.shadowRoot.querySelector("[data-search]");
             if (s) {
                 s.focus();
-                const n = s.value.length;
-                try { s.setSelectionRange(n, n); } catch (e) { /* nieobsługiwane */ }
+                try { s.setSelectionRange(search.selStart, search.selEnd); }
+                catch (e) { /* nieobsługiwane dla tego typu pola */ }
             }
         }
     }
