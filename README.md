@@ -12,8 +12,12 @@ required; the card is pure frontend.
 
 ## Features
 
-- **Fleet list** built from the HA device registry (filtered by manufacturer
-  `HomeID`): name, model, chip ID, IP, RSSI, online/offline dot and firmware version.
+- **Fleet table** built from the HA device registry (filtered by manufacturer
+  `HomeID`): name (with chip ID, IP and RSSI underneath), model, firmware version,
+  uptime, online/offline dot and OTA status — in fixed, aligned columns.
+- **Sorting and search** — click a column header (name / model / version / uptime /
+  status) to sort, click again to reverse; the search box filters by name, model,
+  chip ID, IP and version.
 - **Stale-version highlight** — devices running an older firmware than the newest
   one seen in the fleet (compared per model) are marked orange, with a fleet-wide
   counter in the summary line.
@@ -85,6 +89,11 @@ The card talks only to standard Home Assistant APIs:
 - progress: the OTA status sensor plus entity availability; a device that comes
   back online after the `downloading` phase re-publishes discovery with its new
   version, which refreshes the version column automatically.
+
+Success is detected by values, not just transitions — the HA frontend coalesces
+state changes, so a fast update may never show the offline blip. The card treats
+`ota/state` returning to `idle` **or** a changed `sw_version` in the registry as
+a completed update, with a per-device timeout as the final backstop.
 
 > **Note:** the update queue runs in the browser tab. Keep the dashboard open until
 > the batch finishes — closing the tab cancels the devices still waiting in the
