@@ -1,0 +1,7 @@
+{
+  "name": "HomeID Fleet Card",
+  "content_in_root": false,
+  "filename": "homeid-fleet-card.js",
+  "render_readme": true,
+  "homeassistant": "2022.12.0"
+}
