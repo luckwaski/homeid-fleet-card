@@ -31,7 +31,7 @@
  * pozostałe w kolejce; trwająca aktualizacja na urządzeniu i tak się dokończy).
  */
 
-const HOMEID_FLEET_CARD_VERSION = "1.7.0";
+const HOMEID_FLEET_CARD_VERSION = "1.7.1";
 
 // Fazy zadania aktualizacji; FINAL = stany końcowe.
 const HF_FINAL = ["done", "uptodate", "failed", "timeout", "offline", "cancelled"];
@@ -843,6 +843,8 @@ class HomeidFleetCard extends HTMLElement {
             .arr.dim { opacity: 0.35; }
             td { padding: 8px 10px 8px 0; border-bottom: 1px solid var(--divider-color);
                  vertical-align: middle; }
+            /* Półprzezroczysta szarość działa na jasnym i ciemnym motywie. */
+            tbody tr:hover { background: rgba(127, 127, 127, 0.12); }
             tr.offline .c-name, tr.offline .c-model, tr.offline .c-ver,
             tr.offline .c-up { opacity: 0.5; }
             .c-sel { width: 26px; }
