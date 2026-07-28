@@ -13,12 +13,12 @@ required; the card is pure frontend.
 ## Features
 
 - **Fleet table** built from the HA device registry (filtered by manufacturer
-  `HomeID`): name (with chip ID underneath), model, IP (click to copy it to the
-  clipboard), RSSI, firmware version, uptime, online/offline dot and OTA status —
-  in fixed, aligned columns.
-- **Sorting and search** — click a column header (name / model / IP / RSSI /
-  version / uptime / status) to sort, click again to reverse; the search box
-  filters by name, model, chip ID, IP and version.
+  `HomeID`): name (with chip ID underneath), area, model, IP (click to copy it
+  to the clipboard), RSSI, firmware version, uptime, free heap memory,
+  online/offline dot and OTA status — in fixed, aligned columns.
+- **Sorting and search** — click a column header (name / area / model / IP /
+  RSSI / version / uptime / memory / status) to sort, click again to reverse;
+  the search box filters by name, area, model, chip ID, IP and version.
 - **Device page link** — the device name opens the HA device page
   (`/config/devices/device/<id>`) via SPA navigation; Ctrl/Cmd-click opens it
   in a new browser tab.

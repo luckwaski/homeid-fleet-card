@@ -31,7 +31,7 @@
  * pozostałe w kolejce; trwająca aktualizacja na urządzeniu i tak się dokończy).
  */
 
-const HOMEID_FLEET_CARD_VERSION = "1.6.0";
+const HOMEID_FLEET_CARD_VERSION = "1.7.0";
 
 // Fazy zadania aktualizacji; FINAL = stany końcowe.
 const HF_FINAL = ["done", "uptodate", "failed", "timeout", "offline", "cancelled"];
@@ -66,6 +66,15 @@ function hfUptime(sec) {
     if (h) return `${h}h ${m}m`;
     if (m) return `${m}m`;
     return `${s}s`;
+}
+
+// Bajty -> "23.4 kB" / "1.2 MB" / "512 B".
+function hfBytes(b) {
+    const n = parseInt(b, 10);
+    if (isNaN(n) || n < 0) return "";
+    if (n >= 1048576) return (n / 1048576).toFixed(1) + " MB";
+    if (n >= 1024) return (n / 1024).toFixed(1) + " kB";
+    return n + " B";
 }
 
 class HomeidFleetCard extends HTMLElement {
@@ -167,7 +176,8 @@ class HomeidFleetCard extends HTMLElement {
         const conn = this._hass.connection;
         // Po OTA firmware publikuje discovery z nową wersją -> rejestr się
         // zmienia -> odświeżamy listę (m.in. kolumnę wersji).
-        for (const ev of ["device_registry_updated", "entity_registry_updated"]) {
+        for (const ev of ["device_registry_updated", "entity_registry_updated",
+                          "area_registry_updated"]) {
             this._unsubs.push(conn.subscribeEvents(() => this._scheduleReload(), ev));
         }
     }
@@ -183,10 +193,12 @@ class HomeidFleetCard extends HTMLElement {
     async _reloadRegistries() {
         if (!this._hass) return;
         try {
-            const [devs, ents] = await Promise.all([
+            const [devs, ents, areas] = await Promise.all([
                 this._hass.callWS({ type: "config/device_registry/list" }),
                 this._hass.callWS({ type: "config/entity_registry/list" }),
+                this._hass.callWS({ type: "config/area_registry/list" }),
             ]);
+            const areaName = new Map((areas || []).map((a) => [a.area_id, a.name]));
             const byDev = new Map();
             for (const e of ents) {
                 if (e.disabled_by || !e.device_id) continue;
@@ -204,6 +216,7 @@ class HomeidFleetCard extends HTMLElement {
                     model: d.model || "?",
                     sw: d.sw_version || "",
                     chip: this._chipId(d),
+                    area: areaName.get(d.area_id) || "",
                     btnUpdate: this._findEntity(de, "button", "update",
                         "Zainstaluj aktualizacje", ["zainstaluj_aktualizacje", "_update"]),
                     btnRestart: this._findEntity(de, "button", "restart",
@@ -218,6 +231,8 @@ class HomeidFleetCard extends HTMLElement {
                         "Uptime", ["uptime"]),
                     resetSensor: this._findEntity(de, "sensor", null,
                         "Restart reason", ["restart_reason", "_reset"]),
+                    heapSensor: this._findEntity(de, "sensor", "data_size",
+                        "Free memory", ["free_memory", "_heap"]),
                 };
                 if (row.btnUpdate) list.push(row); // tylko urządzenia z przyciskiem OTA
             }
@@ -286,6 +301,11 @@ class HomeidFleetCard extends HTMLElement {
         return isNaN(v) ? -1 : v;
     }
 
+    _heapBytes(dev) {
+        const v = parseInt(this._diag(dev, dev.heapSensor), 10);
+        return isNaN(v) ? -1 : v;
+    }
+
     // Najnowsza wersja w flocie per model — starsze podświetlamy.
     _maxVerByModel() {
         const max = {};
@@ -306,7 +326,7 @@ class HomeidFleetCard extends HTMLElement {
         const f = this._filter.trim().toLowerCase();
         if (f) {
             list = list.filter((d) => [
-                d.name, d.model, d.chip, d.sw, this._diag(d, d.ipSensor),
+                d.name, d.model, d.chip, d.sw, d.area, this._diag(d, d.ipSensor),
             ].join(" ").toLowerCase().includes(f));
         }
         const byName = (a, b) => a.name.localeCompare(b.name, "pl");
@@ -316,6 +336,8 @@ class HomeidFleetCard extends HTMLElement {
         };
         const cmps = {
             name: byName,
+            area: (a, b) => (a.area || "").localeCompare(b.area || "", "pl") || byName(a, b),
+            heap: (a, b) => (this._heapBytes(a) - this._heapBytes(b)) || byName(a, b),
             model: (a, b) => a.model.localeCompare(b.model, "pl") || byName(a, b),
             version: (a, b) => hfCmpVer(a.sw, b.sw) || byName(a, b),
             // hfCmpVer porównuje człony po kropce numerycznie — pasuje i do IP
@@ -670,10 +692,13 @@ class HomeidFleetCard extends HTMLElement {
                 // każda okresowa publikacja diagnostyki wymuszałaby pełny
                 // re-render (podmiana DOM zjada trwające kliknięcia).
                 const rssi = parseInt(this._diag(d, d.rssiSensor), 10);
-                return [d.id, d.name, d.model, d.sw, this._isOnline(d), this._otaState(d),
+                return [d.id, d.name, d.area, d.model, d.sw, this._isOnline(d),
+                    this._otaState(d),
                     this._diag(d, d.ipSensor),
                     isNaN(rssi) ? "" : Math.round(rssi / 5) * 5,
                     hfUptime(this._uptimeSec(d)),
+                    // heap w pełnych kB — drobny jitter nie wymusza renderu
+                    Math.round(this._heapBytes(d) / 1024),
                     j ? [j.phase, j.note, running ? Math.round((Date.now() - j.t0) / 1000) : 0] : null];
             }),
         ]);
@@ -743,12 +768,15 @@ class HomeidFleetCard extends HTMLElement {
                 <input type="checkbox" data-selall title="zaznacz widoczne online">
             </th>
             <th class="sortable" data-sort="name">Nazwa ${arrow("name")}</th>
+            <th class="sortable" data-sort="area">Obszar ${arrow("area")}</th>
             <th class="sortable" data-sort="model">Model ${arrow("model")}</th>
             ${this._config.show_diagnostics ? `
             <th class="sortable" data-sort="ip">IP ${arrow("ip")}</th>
             <th class="sortable" data-sort="rssi">RSSI ${arrow("rssi")}</th>` : ""}
             <th class="sortable" data-sort="version">Wersja ${arrow("version")}</th>
             <th class="sortable" data-sort="uptime">Uptime ${arrow("uptime")}</th>
+            ${this._config.show_diagnostics ? `
+            <th class="sortable" data-sort="heap">Pamięć ${arrow("heap")}</th>` : ""}
             <th class="sortable" data-sort="status">Status ${arrow("status")}</th>
             <th></th>`);
 
@@ -849,7 +877,12 @@ class HomeidFleetCard extends HTMLElement {
                                    border-bottom: none; font-weight: 600; }
             .c-rssi { font-size: 0.82em; white-space: nowrap;
                       color: var(--primary-text-color); }
-            tr.offline .c-ip, tr.offline .c-rssi { opacity: 0.5; }
+            .c-area { font-size: 0.85em; white-space: nowrap;
+                      color: var(--primary-text-color); }
+            .c-heap { font-size: 0.82em; white-space: nowrap;
+                      color: var(--primary-text-color); }
+            tr.offline .c-ip, tr.offline .c-rssi,
+            tr.offline .c-area, tr.offline .c-heap { opacity: 0.5; }
             .c-stat { font-size: 0.82em; min-width: 120px; }
             .chip { padding: 2px 8px; border-radius: 10px; white-space: nowrap;
                     background: var(--secondary-background-color); }
@@ -897,6 +930,9 @@ class HomeidFleetCard extends HTMLElement {
                 data-act="copy-ip" data-id="${d.id}" data-ip="${hfEsc(ip)}"
                 title="Kliknij, aby skopiować adres">${copied ? "✓ skopiowano" : hfEsc(ip)}</a>` : "—"}</td>
             <td class="c-rssi">${rssi ? hfEsc(rssi) + " dBm" : "—"}</td>` : "";
+        const heap = this._heapBytes(d);
+        const heapCell = this._config.show_diagnostics ? `
+            <td class="c-heap">${online && heap >= 0 ? hfBytes(heap) : "—"}</td>` : "";
         return `
         <tr data-id="${d.id}" class="${online ? "" : "offline"}">
             <td class="c-sel">
@@ -915,9 +951,10 @@ class HomeidFleetCard extends HTMLElement {
                     ${sub ? `<div class="sub">${sub}</div>` : ""}
                 </div>
             </td>
+            <td class="c-area">${d.area ? hfEsc(d.area) : "—"}</td>
             <td class="c-model">${hfEsc(d.model)}</td>${diagCells}
             <td class="c-ver ${stale ? "stale" : ""}">${hfEsc(d.sw || "—")}</td>
-            <td class="c-up">${online && up >= 0 ? hfUptime(up) : "—"}</td>
+            <td class="c-up">${online && up >= 0 ? hfUptime(up) : "—"}</td>${heapCell}
             <td class="c-stat">${this._statusCell(d, job, stale)}</td>
             <td class="c-acts">
                 <button class="btn small" data-act="update-one" data-id="${d.id}"
