@@ -31,7 +31,7 @@
  * pozostałe w kolejce; trwająca aktualizacja na urządzeniu i tak się dokończy).
  */
 
-const HOMEID_FLEET_CARD_VERSION = "1.5.0";
+const HOMEID_FLEET_CARD_VERSION = "1.6.0";
 
 // Fazy zadania aktualizacji; FINAL = stany końcowe.
 const HF_FINAL = ["done", "uptodate", "failed", "timeout", "offline", "cancelled"];
@@ -80,6 +80,8 @@ class HomeidFleetCard extends HTMLElement {
         this._batch = null;          // {done, total} bieżącej serii
         this._sort = { key: "model", dir: 1 };
         this._filter = "";
+        this._copiedId = null;       // device_id z pokazanym "skopiowano"
+        this._copiedTimer = null;
         this._regLoaded = false;
         this._subscribed = false;
         this._unsubs = [];
@@ -308,10 +310,18 @@ class HomeidFleetCard extends HTMLElement {
             ].join(" ").toLowerCase().includes(f));
         }
         const byName = (a, b) => a.name.localeCompare(b.name, "pl");
+        const rssiNum = (d) => {
+            const v = parseInt(this._diag(d, d.rssiSensor), 10);
+            return isNaN(v) ? -999 : v;
+        };
         const cmps = {
             name: byName,
             model: (a, b) => a.model.localeCompare(b.model, "pl") || byName(a, b),
             version: (a, b) => hfCmpVer(a.sw, b.sw) || byName(a, b),
+            // hfCmpVer porównuje człony po kropce numerycznie — pasuje i do IP
+            ip: (a, b) => hfCmpVer(this._diag(a, a.ipSensor), this._diag(b, b.ipSensor)) ||
+                byName(a, b),
+            rssi: (a, b) => (rssiNum(a) - rssiNum(b)) || byName(a, b),
             uptime: (a, b) => (this._uptimeSec(a) - this._uptimeSec(b)) || byName(a, b),
             status: (a, b) => (this._isOnline(b) - this._isOnline(a)) ||
                 (this._isStale(b, maxVer) - this._isStale(a, maxVer)) || byName(a, b),
@@ -553,6 +563,18 @@ class HomeidFleetCard extends HTMLElement {
         } else if (act === "update-selected") {
             const ids = this._devices.filter((d) => this._selected.has(d.id)).map((d) => d.id);
             this._enqueue(ids);
+        } else if (act === "copy-ip" && el.dataset.ip) {
+            this._copyText(el.dataset.ip);
+            if (this._copiedTimer) clearTimeout(this._copiedTimer);
+            this._copiedId = id;
+            this._copiedTimer = setTimeout(() => {
+                this._copiedId = null;
+                this._copiedTimer = null;
+                this._sig = "";
+                this._render();
+            }, 1500);
+            this._sig = "";
+            this._render();
         } else if (act === "cancel") {
             this._cancelQueue("anulowano");
         } else if (act === "restart-one" && id) {
@@ -640,7 +662,7 @@ class HomeidFleetCard extends HTMLElement {
         const sig = JSON.stringify([
             this._config.title,
             running, this._active, this._queue,
-            this._batch, this._sort, this._filter,
+            this._batch, this._sort, this._filter, this._copiedId,
             [...this._selected],
             visible.map((d) => {
                 const j = this._jobs.get(d.id);
@@ -722,6 +744,9 @@ class HomeidFleetCard extends HTMLElement {
             </th>
             <th class="sortable" data-sort="name">Nazwa ${arrow("name")}</th>
             <th class="sortable" data-sort="model">Model ${arrow("model")}</th>
+            ${this._config.show_diagnostics ? `
+            <th class="sortable" data-sort="ip">IP ${arrow("ip")}</th>
+            <th class="sortable" data-sort="rssi">RSSI ${arrow("rssi")}</th>` : ""}
             <th class="sortable" data-sort="version">Wersja ${arrow("version")}</th>
             <th class="sortable" data-sort="uptime">Uptime ${arrow("uptime")}</th>
             <th class="sortable" data-sort="status">Status ${arrow("status")}</th>
@@ -815,6 +840,16 @@ class HomeidFleetCard extends HTMLElement {
             .c-ver.stale { color: var(--warning-color, #ff9800); font-weight: 600; }
             .c-up { font-size: 0.82em; white-space: nowrap;
                     color: var(--primary-text-color); }
+            .c-ip { font-family: monospace; font-size: 0.82em; white-space: nowrap; }
+            .c-ip .iplink { cursor: pointer; color: var(--primary-text-color);
+                            border-bottom: 1px dotted var(--secondary-text-color); }
+            .c-ip .iplink:hover { color: var(--primary-color);
+                                  border-bottom-color: var(--primary-color); }
+            .c-ip .iplink.copied { color: var(--success-color, #43a047);
+                                   border-bottom: none; font-weight: 600; }
+            .c-rssi { font-size: 0.82em; white-space: nowrap;
+                      color: var(--primary-text-color); }
+            tr.offline .c-ip, tr.offline .c-rssi { opacity: 0.5; }
             .c-stat { font-size: 0.82em; min-width: 120px; }
             .chip { padding: 2px 8px; border-radius: 10px; white-space: nowrap;
                     background: var(--secondary-background-color); }
@@ -852,11 +887,16 @@ class HomeidFleetCard extends HTMLElement {
         const job = this._jobs.get(d.id);
         const busy = job && !HF_FINAL.includes(job.phase);
         const stale = this._isStale(d, maxVer);
-        const ip = this._config.show_diagnostics ? this._diag(d, d.ipSensor) : "";
-        const rssi = this._config.show_diagnostics ? this._diag(d, d.rssiSensor) : "";
+        const ip = this._diag(d, d.ipSensor);
+        const rssi = this._diag(d, d.rssiSensor);
         const up = this._uptimeSec(d);
-        const sub = [d.chip ? "ID " + hfEsc(d.chip) : "", ip ? hfEsc(ip) : "",
-            rssi ? hfEsc(rssi) + " dBm" : ""].filter(Boolean).join(" · ");
+        const sub = d.chip ? "ID " + hfEsc(d.chip) : "";
+        const copied = this._copiedId === d.id;
+        const diagCells = this._config.show_diagnostics ? `
+            <td class="c-ip">${ip ? `<a class="iplink${copied ? " copied" : ""}"
+                data-act="copy-ip" data-id="${d.id}" data-ip="${hfEsc(ip)}"
+                title="Kliknij, aby skopiować adres">${copied ? "✓ skopiowano" : hfEsc(ip)}</a>` : "—"}</td>
+            <td class="c-rssi">${rssi ? hfEsc(rssi) + " dBm" : "—"}</td>` : "";
         return `
         <tr data-id="${d.id}" class="${online ? "" : "offline"}">
             <td class="c-sel">
@@ -875,7 +915,7 @@ class HomeidFleetCard extends HTMLElement {
                     ${sub ? `<div class="sub">${sub}</div>` : ""}
                 </div>
             </td>
-            <td class="c-model">${hfEsc(d.model)}</td>
+            <td class="c-model">${hfEsc(d.model)}</td>${diagCells}
             <td class="c-ver ${stale ? "stale" : ""}">${hfEsc(d.sw || "—")}</td>
             <td class="c-up">${online && up >= 0 ? hfUptime(up) : "—"}</td>
             <td class="c-stat">${this._statusCell(d, job, stale)}</td>
@@ -887,6 +927,25 @@ class HomeidFleetCard extends HTMLElement {
                     title="Restart urządzenia" ${online && !busy ? "" : "disabled"}>⟳</button>` : ""}
             </td>
         </tr>`;
+    }
+
+    _copyText(text) {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text).catch(() => this._copyFallback(text));
+        } else {
+            this._copyFallback(text);  // np. HA po zwykłym HTTP (brak secure context)
+        }
+    }
+
+    _copyFallback(text) {
+        const ta = document.createElement("textarea");
+        ta.value = text;
+        ta.style.position = "fixed";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.select();
+        try { document.execCommand("copy"); } catch (e) { /* brak wsparcia */ }
+        ta.remove();
     }
 
     // Utrzymuje <tbody> w zgodzie z listą visible: wiersze kluczowane po
